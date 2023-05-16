@@ -260,3 +260,67 @@ chuyển, và sau đó loại bỏ khỏi sổ cái.
 ## Lấy dữ liệu lịch sử từ mạng
 
 Bạn cũng có thể sử dụng `blockEventListener.js
+
+Nếu bạn đã thực hiện các bước ví dụ ở trên, hãy điều hướng quay lại cửa sổ đầu cuối
+nơi `blockEventListener.js` đang chạy và đóng nó lại. Một khi người nghe là không
+chạy lâu hơn, hãy sử dụng lệnh sau để thêm 20 nội dung khác vào
+sổ cái:
+
+```
+nút addAssets.js
+```
+
+Người nghe sẽ không thể thêm nội dung mới vào cơ sở dữ liệu CouchDB của bạn.
+Nếu bạn kiểm tra bảng trạng thái hiện tại bằng lệnh rút gọn, bạn sẽ chỉ
+có thể xem nội dung ban đầu trong cơ sở dữ liệu của bạn.
+
+```
+curl -X NHẬN http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
+```
+
+Để thêm dữ liệu mới vào cơ sở dữ liệu ngoài chuỗi của bạn, hãy xóa `nextblock.txt`
+tệp theo dõi khối mới nhất được đọc bởi `blockEventListener.js`:
+
+```
+rm nextblock.txt
+```
+
+Bạn mới có thể chạy lại trình nghe kênh để đọc mọi khối từ kênh:
+
+```
+nút blockEventListener.js
+```
+
+Điều này sẽ xây dựng lại các bảng CouchDB và bao gồm 20 nội dung đã được
+được bổ sung vào sổ cái. Nếu bạn chạy lệnh rút gọn đối với cơ sở dữ liệu của mình,
+thêm thời gian,
+
+```
+curl -X NHẬN http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
+```
+
+bạn sẽ có thể thấy rằng tất cả nội dung đã được thêm vào
+cơ sở dữ liệu:
+
+```
+{"hàng":[
+{"key":null,"value":39}
+]}
+```
+
+## Dọn dẹp
+
+Các bạn dùng ứng dụng mẫu xong có thể hạ mạng
+và mọi tạo phẩm đi kèm bằng cách chạy lệnh sau:
+```
+./mạng-sạch.sh
+```
+
+Chạy tập lệnh sẽ hoàn thành các hành động sau:
+
+* Mang xuống mạng thử Vải.
+* Gỡ bỏ cơ sở dữ liệu CouchDB cục bộ.
+* Xóa chứng chỉ bạn đã tạo bằng cách xóa thư mục `wallet`.
+* Xóa `nextblock.txt` để bạn có thể bắt đầu với khối đầu tiên vào lần tiếp theo
+   vận hành người nghe.
+* Xóa `addAssets.json`.
