@@ -127,3 +127,136 @@ và sử dụng ứng dụng của chúng tôi để sao chép dữ liệu vào 
 terminal và điều hướng đến thư mục `fabric-samples/off_chain_data/legacy-javascript`.
 
 Bạn có thể sử dụng tệp `addAssets.js` để thêm dữ liệu mẫu ngẫu nhiên vào blockc
+Bạn có thể sử dụng tệp `addAssets.js` để thêm dữ liệu mẫu ngẫu nhiên vào chuỗi khối.
+Tệp sử dụng thông tin cấu hình được lưu trữ trong `addAssets.json` để
+tạo ra một loạt tài sản. Tệp này sẽ được tạo trong lần thực hiện đầu tiên
+của `addAssets.js` nếu nó không tồn tại. Chương trình này có thể chạy nhiều lần
+mà không làm thay đổi thuộc tính. `nextAssetNumber` sẽ được tăng lên và
+được lưu trữ trong tệp `addAssets.json`.
+
+```
+     {
+         "Số tài sản tiếp theo": 100,
+         "sốAssetsToAdd": 20
+     }
+```
+
+Mở một cửa sổ mới và chạy lệnh sau để thêm 20 nội dung vào
+chuỗi khối:
+
+```
+nút addAssets.js
+```
+
+Sau khi tài sản đã được thêm vào sổ cái, hãy sử dụng lệnh sau để
+chuyển một trong các tài sản cho chủ sở hữu mới:
+
+```
+chuyển giao nútAsset.js tài sản110 james
+```
+
+Bây giờ hãy chạy lệnh sau để xóa nội dung đã được chuyển:
+
+```
+nút xóaAsset.js tài sản110
+```
+
+## Lưu trữ CouchDB ngoại tuyến:
+
+Nếu bạn làm theo hướng dẫn ở trên và đặt `use_couchdb` thành true,
+`blockEventListener.js` sẽ tạo hai bảng trong phiên bản cục bộ của CouchDB.
+`blockEventListener.js` được viết để tạo hai bảng cho mỗi kênh và cho
+mỗi chuỗi mã.
+
+Bảng đầu tiên là một đại diện ngoại tuyến của trạng thái thế giới hiện tại của
+sổ cái chuỗi khối. Bảng này được tạo bằng cách sử dụng dữ liệu bộ đọc-ghi từ
+các khối. Nếu người nghe đang chạy, bảng này sẽ giống như bảng
+các giá trị mới nhất trong cơ sở dữ liệu trạng thái đang chạy trên máy ngang hàng của bạn. Bảng được đặt tên
+sau channelid và chaincodeid và được đặt tên là mychannel_basic trong phần này
+ví dụ. Bạn có thể điều hướng đến bảng này bằng trình duyệt của mình:
+http://127.0.0.1:5990/mychannel_basic/_all_docs
+
+Bảng thứ hai ghi lại từng khối dưới dạng mục nhập bản ghi lịch sử và được tạo
+bằng cách sử dụng dữ liệu khối đã được ghi trong tệp nhật ký. Tên bảng nối thêm
+history thành tên của bảng đầu tiên và được đặt tên là mychannel_basic_history
+trong ví dụ này. Bạn cũng có thể điều hướng đến bảng này bằng trình duyệt của mình:
+http://127.0.0.1:5990/mychannel_basic_history/_all_docs
+
+### Định cấu hình chế độ xem bản đồ/thu nhỏ để tổng hợp số lượng nội dung theo màu:
+
+Giờ đây, chúng tôi đã sao chép dữ liệu trạng thái và lịch sử vào các bảng trong CouchDB, chúng tôi
+có thể sử dụng các lệnh sau để truy vấn dữ liệu ngoài chuỗi của chúng tôi. Chúng tôi cũng sẽ thêm một
+index để hỗ trợ một truy vấn phức tạp hơn. Lưu ý rằng nếu `blockEventListener.js`
+không chạy, các lệnh cơ sở dữ liệu bên dưới có thể bị lỗi vì cơ sở dữ liệu chỉ
+được tạo ra khi các sự kiện được nhận.
+
+Mở một cửa sổ terminal mới và thực hiện như sau:
+
+```
+curl -X PUT http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign -d '{"views":{"colorview":{"map":"function (doc) { phát ra(doc.color, 1 );}","giảm":"hàm (khóa, giá trị, kết hợp) {trả về tổng (giá trị)}"}}}' -H 'Loại nội dung:application/json'
+```
+
+Thực hiện truy vấn để truy xuất tổng số nội dung (hàm rút gọn):
+
+```
+curl -X NHẬN http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
+```
+
+Nếu thành công, lệnh này sẽ trả về số lượng tài sản trong chuỗi khối
+trạng thái thế giới mà không cần phải truy vấn sổ cái chuỗi khối:
+
+```
+{"hàng":[
+   {"key":null,"value":19}
+   ]}
+```
+
+Thực hiện một truy vấn mới để truy xuất số lượng nội dung theo màu (hàm bản đồ):
+
+```
+curl -X NHẬN http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?group=true
+```
+
+Lệnh sẽ trả về danh sách nội dung theo màu từ cơ sở dữ liệu CouchDB.
+
+```
+{"hàng":[
+   {"key":"blue","value":2},
+   {"key":"green","value":2},
+   {"key":"purple","value":3},
+   {"key":"red","value":4},
+   {"key":"white","value":6},
+   {"khóa":"vàng","giá trị":2}
+   ]}
+```
+
+Để chạy một lệnh phức tạp hơn đọc qua cơ sở dữ liệu lịch sử khối, chúng tôi
+sẽ tạo một chỉ mục của các trường số khối, trình tự và khóa. chỉ số này
+sẽ hỗ trợ truy vấn theo dõi lịch sử của từng nội dung. thực hiện
+lệnh sau để tạo chỉ mục:
+
+```
+curl -X POST http://127.0.0.1:5990/mychannel_basic_history/_index -d '{"index":{"fields":["blocknumber", "sequence", "key"]},"name":" asset_history"}' -H 'Loại nội dung:application/json'
+```
+
+Bây giờ hãy thực hiện một truy vấn để truy xuất lịch sử của nội dung mà chúng tôi đã chuyển và
+sau đó đã xóa:
+
+```
+curl -X POST http://127.0.0.1:5990/mychannel_basic_history/_find -d '{"selector":{"key":{"$eq":"asset110"}}, "fields":["blocknumber" ,"is_delete","value"],"sort":[{"blocknumber":"asc"}, {"sequence":"asc"}]}' -H 'Content-Type:application/json'
+```
+
+Bạn sẽ thấy lịch sử giao dịch của tài sản đã được tạo,
+chuyển, và sau đó loại bỏ khỏi sổ cái.
+
+```
+{"tài liệu":[
+{"blocknumber":12,"is_delete":false,"value":"{\"docType\":\"asset\",\"name\":\"asset110\",\"color\":\ "blue\",\"size\":60,\"owner\":\"debra\"}"},
+{"blocknumber":22,"is_delete":false,"value":"{\"docType\":\"asset\",\"name\":\"asset110\",\"color\":\ "blue\",\"size\":60,\"owner\":\"james\"}"},
+{"blocknumber":23,"is_delete":true,"value":""}
+   ]}
+```
+
+## Lấy dữ liệu lịch sử từ mạng
+
+Bạn cũng có thể sử dụng `blockEventListener.js
