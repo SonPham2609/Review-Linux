@@ -1,328 +1,410 @@
-# Off Chain data
+## Simple blind auction sample
 
-This sample demonstrates how you can use [Peer channel-based event services](https://hyperledger-fabric.readthedocs.io/en/latest/peer_event_services.html)
-to replicate the data on your blockchain network to an off chain database.
-Using an off chain database allows you to analyze the data from your network or
-build a dashboard without degrading the performance of your application.
+The simple blind auction sample uses Hyperledger Fabric to run an auction where bids are kept private until the auction period is over. Instead of displaying the full bid on the public ledger, buyers can only see hashes of other bids while bidding is underway. This prevents buyers from changing their bids in response to bids submitted by others. After the bidding period ends, participants reveal their bid to try to win the auction. The organizations participating in the auction verify that a revealed bid matches the hash on the public ledger. Whichever has the highest bid wins.
 
-This sample uses the [Fabric network event listener](https://hyperledger.github.io/fabric-sdk-node/release-1.4/tutorial-channel-events.html) from the Node.JS Fabric SDK to write data to local instance of
-CouchDB.
+A user that wants to sell one item can use the smart contract to create an auction. The auction is stored on the channel ledger and can be read by all channel members. The auctions created by the smart contract are run in three steps:
+1. Each auction is created with the status **open**. While the auction is open, buyers can add new bids to the auction. The full bids of each buyer are stored in the implicit private data collections of their organization. After the bid is created, the bidder can submit the hash of the bid to the auction. A bid is added to the auction in two steps because the transaction that creates the bid only needs to be endorsed by a peer of the bidders organization, while a transaction that updates the auction may need to be endorsed by multiple organizations. When the bid is added to the auction, the bidder's organization is added to the list of organizations that need to endorse any updates to the auction.
+2. The auction is **closed** to prevent additional bids from being added to the auction. After the auction is closed, bidders that submitted bids to the auction can reveal their full bid. Only revealed bids can win the auction.
+3. The auction is **ended** to calculate the winner from the set of revealed bids. All organizations participating in the auction calculate the price that clears the auction and the winning bid. The seller can end the auction only if all bidding organizations endorse the same winner and price.
 
-## Getting started
+Before endorsing the transaction that ends the auction, each organization queries the implicit private data collection on their peers to check if any organization member has a winning bid that has not yet been revealed. If a winning bid is found, the organization will withhold their endorsement and prevent the auction from being closed. This prevents the seller from ending the auction prematurely, or colluding with buyers to end the auction at an artificially low price.
 
-This sample uses Node Fabric SDK application code to connect to a running instance
-of the Fabric test network. Make sure that you are running the following
-commands from the `off_chain_data/legacy-javascript` directory.
+The sample uses several Fabric features to make the auction private and secure. Bids are stored in private data collections to prevent bids from being distributed to other peers in the channel. When bidding is closed, the auction smart contract uses the `GetPrivateDataHash()` API to verify that the bid stored in private data is the same bid that is being revealed. State based endorsement is used to add the organization of each bidder to the auction endorsement policy. The smart contract uses the `GetClientIdentity.GetID()` API to ensure that only the potential buyer can read their bid from private state and only the seller can close or end the auction.
 
-### Starting the Network
+This tutorial uses the auction smart contract in a scenario where one seller wants to auction a painting. Four potential buyers from two different organizations will submit bids to the auction and try to win the auction.
 
-Use the following command to start the sample network:
+## Deploy the chaincode
 
+We will run the auction smart contract using the Fabric test network. Open a command terminal and navigate to the test network directory:
 ```
-./startFabric.sh
+cd fabric-samples/test-network
 ```
 
-This command will deploy an instance of the Fabric test network. The network
-consists of an ordering service, two peer organizations with one peers each, and
-a CA for each org. The command also creates a channel named `mychannel`. The
-`asset-transfer-basic` chaincode will be installed on both peers and deployed to
-the channel.
-
-### Configuration
-
-The configuration for the listener is stored in the `config.json` file:
-
+You can then run the following command to deploy the test network.
 ```
-{
-    "peer_name": "peer0.org1.example.com",
-    "channelid": "mychannel",
-    "use_couchdb":true,
-    "create_history_log":true,
-    "couchdb_address": "http://admin:password@localhost:5990"
-}
+./network.sh up createChannel -ca
 ```
 
-`peer_name:` is the target peer for the listener.
-`channelid:` is the channel name for block events.
-`use_couchdb:` If set to true, events will be stored in a local instance of
-CouchDB. If set to false, only a local log of events will be stored.
-`create_history_log:` If true, a local log file will be created with all of the
-block changes.
-`couchdb_address:` is the local address for an off chain CouchDB database with username and password.
+Note that we use the `-ca` flag to deploy the network using certificate authorities. We will use the CA to register and enroll our sellers and buyers.
 
-### Create an instance of CouchDB
-
-If you set the "use_couchdb" option to true in `config.json`, you can run the
-following command start a local instance of CouchDB using docker:
-
+Run the following command to deploy the auction smart contract. We will override the default endorsement policy to allow any channel member to create an auction without requiring an endorsement from another organization.
 ```
-docker run -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=password --publish 5990:5984 --detach --name offchaindb couchdb:3.2.2
-docker start offchaindb
+./network.sh deployCC -ccn auction -ccp ../auction-simple/chaincode-go/ -ccl go -ccep "OR('Org1MSP.peer','Org2MSP.peer')"
 ```
 
+## Install the application dependencies
 
-### Install dependencies
+We will interact with the auction smart contract through a set of Node.js applications. Change into the `application-javascript` directory:
+```
+cd fabric-samples/auction-simple/application-javascript
+```
 
-You need to install Node.js version 8.9.x to use the sample application code.
-Execute the following commands to install the required dependencies:
-
+From this directory, run the following command to download the application dependencies:
 ```
 npm install
 ```
 
-### Starting the Channel Event Listener
+## Register and enroll the application identities
 
-After we have installed the application dependencies, we can use the Node.js SDK
-to create the identity our listener application will use to interact with the
-network. Run the following command to enroll the admin user:
+To interact with the network, you will need to enroll the Certificate Authority administrators of Org1 and Org2. You can use the `enrollAdmin.js` program for this task. Run the following command to enroll the Org1 admin:
 ```
-node enrollAdmin.js
+node enrollAdmin.js org1
 ```
-
-You can then run the following command to register and enroll an application
-user:
-
+You should see the logs of the admin wallet being created on your local file system. Now run the command to enroll the CA admin of Org2:
 ```
-node registerUser.js
+node enrollAdmin.js org2
 ```
 
-We can then use our application user to start the block event listener:
+We can use the CA admins of both organizations to register and enroll the identities of the seller that will create the auction and the bidders who will try to purchase the painting.
 
+Run the following command to register and enroll the seller identity that will create the auction. The seller will belong to Org1.
 ```
-node blockEventListener.js
+node registerEnrollUser.js org1 seller
 ```
 
-If the command is successful, you should see the output of the listener reading
-the configuration blocks of `mychannel` in addition to the blocks that recorded
-the approval and commitment of the assets chaincode definition.
-
-`blockEventListener.js` creates a listener named "offchain-listener" on the
-channel `mychannel`. The listener writes each block added to the channel to a
-processing map called BlockMap for temporary storage and ordering purposes.
-`blockEventListener.js` uses `nextblock.txt` to keep track of the latest block
-that was retrieved by the listener. The block number in `nextblock.txt` may be
-set to a previous block number in order to replay previous blocks. The file
-may also be deleted and all blocks will be replayed when the block listener is
-started.
-
-`BlockProcessing.js` runs as a daemon and pulls each block in order from the
-BlockMap. It then uses the read-write set of that block to extract the latest
-key value data and store it in the database. The configuration blocks of
-mychannel did not any data to the database because the blocks did not contain a
-read-write set.
-
-The channel event listener also writes metadata from each block to a log file
-defined as channelid_chaincodeid.log. In this example, events will be written to
-a file named `mychannel_basic.log`. This allows you to record a history of
-changes made by each block for each key in addition to storing the latest value
-of the world state.
-
-**Note:** Leave the blockEventListener.js running in a terminal window. Open a
-new window to execute the next parts of the demo.
-
-### Generate data on the blockchain
-
-Now that our listener is setup, we can generate data using the assets chaincode
-and use our application to replicate the data to our database. Open a new
-terminal and navigate to the `fabric-samples/off_chain_data/legacy-javascript` directory.
-
-You can use the `addAssets.js` file to add random sample data to blockchain.
-The file uses the configuration information stored in `addAssets.json` to
-create a series of assets. This file will be created during the first execution
-of `addAssets.js` if it does not exist. This program can be run multiple times
-without changing the properties. The `nextAssetNumber` will be incremented and
-stored in the `addAssets.json` file.
-
+You should see the logs of the seller wallet being created as well. Run the following commands to register and enroll 2 bidders from Org1 and another 2 bidders from Org2:
 ```
-    {
-        "nextAssetNumber": 100,
-        "numberAssetsToAdd": 20
+node registerEnrollUser.js org1 bidder1
+node registerEnrollUser.js org1 bidder2
+node registerEnrollUser.js org2 bidder3
+node registerEnrollUser.js org2 bidder4
+```
+
+## Create the auction
+
+The seller from Org1 would like to create an auction to sell a vintage Matchbox painting. Run the following command to use the seller wallet to run the `createAuction.js` application. The program will submit a transaction to the network that creates the auction on the channel ledger. The organization and identity name are passed to the application to use the wallet that was created by the `registerEnrollUser.js` application. The seller needs to provide an ID for the auction and the item to be sold to create the auction:
+```
+node createAuction.js org1 seller PaintingAuction painting
+```
+
+After the transaction is complete, the `createAuction.js` application will query the auction stored in the public channel ledger:
+```
+*** Result: Auction: {
+  "objectType": "auction",
+  "item": "painting",
+  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
+  "organizations": [
+    "Org1MSP"
+  ],
+  "privateBids": {},
+  "revealedBids": {},
+  "winner": "",
+  "price": 0,
+  "status": "open"
+}
+```
+The smart contract uses the `GetClientIdentity().GetID()` API to read the identity that creates the auction and defines that identity as the auction `"seller"`. The seller is identified by the name and issuer of the seller's certificate.
+
+## Bid on the auction
+
+We can now use the bidder wallets to submit bids to the auction:
+
+### Bid as bidder1
+
+Bidder1 will create a bid to purchase the painting for 800 dollars.
+```
+node bid.js org1 bidder1 PaintingAuction 800
+```
+
+The application will query the bid after it is created:
+```
+*** Result:  Bid: {
+  "objectType": "bid",
+  "price": 800,
+  "org": "Org1MSP",
+  "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
+}
+```
+
+The bid is stored in the Org1 implicit data collection. The `"bidder"` parameter is the information from the certificate of the user that created the bid. Only this identity will be able can query the bid from private state or reveal the bid during the auction.
+
+The `bid.js` application also prints the bidID:
+```
+*** Result ***SAVE THIS VALUE*** BidID: 67d85ef08e32de20994c816362d0952fe5c2ae3f2d1083600c3ac61f65a89f60
+```
+
+The BidID acts as the unique identifier for the bid. This ID allows you to query the bid using the `queryBid.js` program and add the bid to the auction. Save the bidID returned by the application as an environment variable in your terminal:
+```
+export BIDDER1_BID_ID=67d85ef08e32de20994c816362d0952fe5c2ae3f2d1083600c3ac61f65a89f60
+```
+This value will be different for each transaction, so you will need to use the value returned in your terminal.
+
+Now that the bid has been created, you can submit the bid to the auction. Run the following command to submit the bid that was just created:
+```
+node submitBid.js org1 bidder1 PaintingAuction $BIDDER1_BID_ID
+```
+
+The hash of bid will be added to the list private bids in that have been submitted to `PaintingAuction`. Storing the hash in the public auction allows users to accurately reveal the bid after bidding is closed. The application will query the auction to verify that the bid was added:
+```
+*** Result: Auction: {
+  "objectType": "auction",
+  "item": "painting",
+  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
+  "organizations": [
+    "Org1MSP"
+  ],
+  "privateBids": {
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "org": "Org1MSP",
+      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
     }
+  },
+  "revealedBids": {},
+  "winner": "",
+  "price": 0,
+  "status": "open"
+}
 ```
 
-Open a new window and run the following command to add 20 assets to the
-blockchain:
+### Bid as bidder2
 
+Let's submit another bid. Bidder2 would like to purchase the painting for 500 dollars.
 ```
-node addAssets.js
-```
-
-After the assets have been added to the ledger, use the following command to
-transfer one of the assets to a new owner:
-
-```
-node transferAsset.js asset110 james
+node bid.js org1 bidder2 PaintingAuction 500
 ```
 
-Now run the following command to delete the asset that was transferred:
-
+Save the Bid ID returned by the application:
 ```
-node deleteAsset.js asset110
-```
-
-## Offchain CouchDB storage:
-
-If you followed the instructions above and set `use_couchdb` to true,
-`blockEventListener.js` will create two tables in the local instance of CouchDB.
-`blockEventListener.js` is written to create two tables for each channel and for
-each chaincode.
-
-The first table is an offline representation of the current world state of the
-blockchain ledger. This table was created using the read-write set data from
-the blocks. If the listener is running, this table should be the same as the
-latest values in the state database running on your peer. The table is named
-after the channelid and chaincodeid, and is named mychannel_basic in this
-example. You can navigate to this table using your browser:
-http://127.0.0.1:5990/mychannel_basic/_all_docs
-
-A second table records each block as a historical record entry, and was created
-using the block data that was recorded in the log file. The table name appends
-history to the name of the first table, and is named mychannel_basic_history
-in this example. You can also navigate to this table using your browser:
-http://127.0.0.1:5990/mychannel_basic_history/_all_docs
-
-### Configure a map/reduce view for summarizing counts of assets by color:
-
-Now that we have state and history data replicated to tables in CouchDB, we
-can use the following commands query our off-chain data. We will also add an
-index to support a more complex query. Note that if the `blockEventListener.js`
-is not running, the database commands below may fail since the database is only
-created when events are received.
-
-Open a new terminal window and execute the following:
-
-```
-curl -X PUT http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign -d '{"views":{"colorview":{"map":"function (doc) { emit(doc.color, 1);}","reduce":"function ( keys , values , combine ) {return sum( values )}"}}}' -H 'Content-Type:application/json'
+export BIDDER2_BID_ID=0fa8b3b15923966f205a1f5ebd163d2707d069ffa055105114fc654d225f511d
 ```
 
-Execute a query to retrieve the total number of assets (reduce function):
-
+Submit bidder2's bid to the auction:
 ```
-curl -X GET http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
-```
-
-If successful, this command will return the number of assets in the blockchain
-world state, without having to query the blockchain ledger:
-
-```
-{"rows":[
-  {"key":null,"value":19}
-  ]}
+node submitBid.js org1 bidder2 PaintingAuction $BIDDER2_BID_ID
 ```
 
-Execute a new query to retrieve the number of assets by color (map function):
+### Bid as bidder3 from Org2
 
+Bidder3 will bid 700 dollars for the painting:
 ```
-curl -X GET http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?group=true
-```
-
-The command will return a list of assets by color from the CouchDB database.
-
-```
-{"rows":[
-  {"key":"blue","value":2},
-  {"key":"green","value":2},
-  {"key":"purple","value":3},
-  {"key":"red","value":4},
-  {"key":"white","value":6},
-  {"key":"yellow","value":2}
-  ]}
+node bid.js org2 bidder3 PaintingAuction 700
 ```
 
-To run a more complex command that reads through the block history database, we
-will create an index of the blocknumber, sequence, and key fields. This index
-will support a query that traces the history of each asset. Execute the
-following command to create the index:
-
+Save the Bid ID returned by the application:
 ```
-curl -X POST http://127.0.0.1:5990/mychannel_basic_history/_index -d '{"index":{"fields":["blocknumber", "sequence", "key"]},"name":"asset_history"}'  -H 'Content-Type:application/json'
+export BIDDER3_BID_ID=cda8bb2849fc0553efb036c56ea86d82791a695b5641941dac797dc6e2d75768
 ```
 
-Now execute a query to retrieve the history for the asset we transferred and
-then deleted:
-
+Add bidder3's bid to the auction:
 ```
-curl -X POST http://127.0.0.1:5990/mychannel_basic_history/_find -d '{"selector":{"key":{"$eq":"asset110"}}, "fields":["blocknumber","is_delete","value"],"sort":[{"blocknumber":"asc"}, {"sequence":"asc"}]}'  -H 'Content-Type:application/json'
+node submitBid.js org2 bidder3 PaintingAuction $BIDDER3_BID_ID
 ```
 
-You should see the transaction history of the asset that was created,
-transferred, and then removed from the ledger.
-
+Because bidder3 belongs to Org2, submitting the bid will add Org2 to the list of participating organizations. You can see the Org2 MSP ID has been added to the list of `"organizations"` in the updated auction returned by the application:
 ```
-{"docs":[
-{"blocknumber":12,"is_delete":false,"value":"{\"docType\":\"asset\",\"name\":\"asset110\",\"color\":\"blue\",\"size\":60,\"owner\":\"debra\"}"},
-{"blocknumber":22,"is_delete":false,"value":"{\"docType\":\"asset\",\"name\":\"asset110\",\"color\":\"blue\",\"size\":60,\"owner\":\"james\"}"},
-{"blocknumber":23,"is_delete":true,"value":""}
-  ]}
-```
-
-## Getting historical data from the network
-
-You can also use the `blockEventListener.js` program to retrieve historical data
-from your network. This allows you to create a database that is up to date with
-the latest data from the network or recover any blocks that the program may
-have missed.
-
-If you ran through the example steps above, navigate back to the terminal window
-where `blockEventListener.js` is running and close it. Once the listener is no
-longer running, use the following command to add 20 more assets to the
-ledger:
-
-```
-node addAssets.js
-```
-
-The listener will not be able to add the new assets to your CouchDB database.
-If you check the current state table using the reduce command, you will only
-be able to see the original assets in your database.
-
-```
-curl -X GET http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
+*** Result: Auction: {
+  "objectType": "auction",
+  "item": "painting",
+  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
+  "organizations": [
+    "Org1MSP",
+    "Org2MSP"
+  ],
+  "privateBids": {
+    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
+      "org": "Org1MSP",
+      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "org": "Org1MSP",
+      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
+      "org": "Org2MSP",
+      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
+    }
+  },
+  "revealedBids": {},
+  "winner": "",
+  "price": 0,
+  "status": "open"
+}
 ```
 
-To add the new data to your off-chain database, remove the `nextblock.txt`
-file that kept track of the latest block read by `blockEventListener.js`:
+Now that a bid from Org2 has been added to the auction, any updates to the auction need to be endorsed by the Org2 peer. The applications will use `"organizations"` field to specify which organizations need to endorse submitting a new bid, revealing a bid, or updating the auction status.
 
-```
-rm nextblock.txt
-```
+### Bid as bidder4
 
-You can new re-run the channel listener to read every block from the channel:
-
+Bidder4 from Org2 would like to purchase the painting for 900 dollars:
 ```
-node blockEventListener.js
+node bid.js org2 bidder4 PaintingAuction 900
 ```
 
-This will rebuild the CouchDB tables and include the 20 assets that have been
-added to the ledger. If you run the reduce command against your database one
-more time,
-
+Save the Bid ID returned by the application:
 ```
-curl -X GET http://127.0.0.1:5990/mychannel_basic/_design/colorviewdesign/_view/colorview?reduce=true
+export BIDDER4_BID_ID=83861eb17715ff537a1e73cd2d08509dc7199572806a5368706516759af1a257
 ```
 
-you will be able to see that all of the assets have been added to your
-database:
+Add bidder4's bid to the auction:
+```
+node submitBid.js org2 bidder4 PaintingAuction $BIDDER4_BID_ID
+```
+
+## Close the auction
+
+Now that all four bidders have joined the auction, the seller would like to close the auction and allow buyers to reveal their bids. The seller identity that created the auction needs to submit the transaction:
+```
+node closeAuction.js org1 seller PaintingAuction
+```
+
+The application will query the auction to allow you to verify that the auction status has changed to closed. As a test, you can try to create and submit a new bid to verify that no new bids can be added to the auction.
+
+## Reveal bids
+
+After the auction is closed, bidders can try to win the auction by revealing their bids. The transaction to reveal a bid needs to pass four checks:
+1. The auction is closed.
+2. The transaction was submitted by the identity that created the bid.
+3. The hash of the revealed bid matches the hash of the bid on the channel ledger. This confirms that the bid is the same as the bid that is stored in the private data collection.
+4. The hash of the revealed bid matches the hash that was submitted to the auction. This confirms that the bid was not altered after the auction was closed.
+
+Use the `revealBid.js` application to reveal the bid of Bidder1:
+```
+node revealBid.js org1 bidder1 PaintingAuction $BIDDER1_BID_ID
+```
+
+The full bid details, including the price, are now visible:
+```
+*** Result: Auction: {
+  "objectType": "auction",
+  "item": "painting",
+  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
+  "organizations": [
+    "Org1MSP",
+    "Org2MSP"
+  ],
+  "privateBids": {
+    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
+      "org": "Org2MSP",
+      "hash": "08db66c6cc226577a3153dadeb0b77d3834162fcf5f008b344058a1bc5c1b3a4"
+    },
+    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
+      "org": "Org1MSP",
+      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "org": "Org1MSP",
+      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
+      "org": "Org2MSP",
+      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
+    }
+  },
+  "revealedBids": {
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "objectType": "bid",
+      "price": 800,
+      "org": "Org1MSP",
+      "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
+    }
+  },
+  "winner": "",
+  "price": 0,
+  "status": "closed"
+}
+```
+
+Bidder3 from Org2 will also reveal their bid:
+```
+node revealBid.js org2 bidder3 PaintingAuction $BIDDER3_BID_ID
+```
+
+If the auction ended now, Bidder1 would win. Let's try to end the auction using the seller identity and see what happens.
 
 ```
-{"rows":[
-{"key":null,"value":39}
-]}
+node endAuction.js org1 seller PaintingAuction
+```
+
+The output should look something like the following:
+
+```
+--> Submit the transaction to end the auction
+2021-01-28T16:47:27.501Z - error: [DiscoveryHandler]: compareProposalResponseResults[undefined] - read/writes result sets do not match index=1
+2021-01-28T16:47:27.503Z - error: [Transaction]: Error: No valid responses from any peers. Errors:
+    peer=undefined, status=grpc, message=Peer endorsements do not match
+******** FAILED to submit bid: Error: No valid responses from any peers. Errors:
+    peer=undefined, status=grpc, message=Peer endorsements do not match
+```
+
+Instead of ending the auction, the transaction results in an endorsement policy failure. The end of the auction needs to be endorsed by Org2. Before endorsing the transaction, the Org2 peer queries its private data collection for any winning bids that have not yet been revealed. Because Bidder4 created a bid that is above the winning price, the Org2 peer refuses to endorse the transaction that would end the auction.
+
+Before we can end the auction, we need to reveal the bid from bidder4.
+```
+node revealBid.js org2 bidder4 PaintingAuction $BIDDER4_BID_ID
+```
+
+Bidder2 from Org1 would not win the auction in either case. As a result, Bidder2 decides not to reveal their bid.
+
+## End the auction
+
+Now that the winning bids have been revealed, we can end the auction:
+```
+node endAuction org1 seller PaintingAuction
+```
+
+The transaction was successfully endorsed by both Org1 and Org2, who both calculated the same price and winner. The winning bidder is listed along with the price:
+```
+*** Result: Auction: {
+  "objectType": "auction",
+  "item": "painting",
+  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
+  "organizations": [
+    "Org1MSP",
+    "Org2MSP"
+  ],
+  "privateBids": {
+    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
+      "org": "Org2MSP",
+      "hash": "08db66c6cc226577a3153dadeb0b77d3834162fcf5f008b344058a1bc5c1b3a4"
+    },
+    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
+      "org": "Org1MSP",
+      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "org": "Org1MSP",
+      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
+      "org": "Org2MSP",
+      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
+    }
+  },
+  "revealedBids": {
+    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
+      "objectType": "bid",
+      "price": 900,
+      "org": "Org2MSP",
+      "bidder": "x509::CN=bidder4,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
+      "objectType": "bid",
+      "price": 800,
+      "org": "Org1MSP",
+      "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
+    },
+    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
+      "objectType": "bid",
+      "price": 700,
+      "org": "Org2MSP",
+      "bidder": "x509::CN=bidder3,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK"
+    }
+  },
+  "winner": "x509::CN=bidder4,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK",
+  "price": 900,
+  "status": "ended"
+}
 ```
 
 ## Clean up
 
-If you are finished using the sample application, you can bring down the network
-and any accompanying artifacts by running the following command:
+When your are done using the auction smart contract, you can bring down the network and clean up the environment. In the `auction-simple/application-javascript` directory, run the following command to remove the wallets used to run the applications:
 ```
-./network-clean.sh
+rm -rf wallet
 ```
 
-Running the script will complete the following actions:
-
-* Bring down the Fabric test network.
-* Takes down the local CouchDB database.
-* Remove the certificates you generated by deleting the `wallet` folder.
-* Delete `nextblock.txt` so you can start with the first block next time you
-  operate the listener.
-* Removes `addAssets.json`.
+You can then navigate to the test network directory and bring down the network:
+````
+cd ../../test-network/
+./network.sh down
+````
