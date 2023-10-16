@@ -1,410 +1,502 @@
-## Simple blind auction sample
 
-The simple blind auction sample uses Hyperledger Fabric to run an auction where bids are kept private until the auction period is over. Instead of displaying the full bid on the public ledger, buyers can only see hashes of other bids while bidding is underway. This prevents buyers from changing their bids in response to bids submitted by others. After the bidding period ends, participants reveal their bid to try to win the auction. The organizations participating in the auction verify that a revealed bid matches the hash on the public ledger. Whichever has the highest bid wins.
+<div align="center">
+ <p>
+  <h1>
+   Rapidly Search and Hunt through Windows Forensic Artefacts
+  </h1>
+ </p>
+<img style="padding:0;vertical-align:bottom;" height="76" width="300" src="images/chainsaw.png"/>
+</div>
 
-A user that wants to sell one item can use the smart contract to create an auction. The auction is stored on the channel ledger and can be read by all channel members. The auctions created by the smart contract are run in three steps:
-1. Each auction is created with the status **open**. While the auction is open, buyers can add new bids to the auction. The full bids of each buyer are stored in the implicit private data collections of their organization. After the bid is created, the bidder can submit the hash of the bid to the auction. A bid is added to the auction in two steps because the transaction that creates the bid only needs to be endorsed by a peer of the bidders organization, while a transaction that updates the auction may need to be endorsed by multiple organizations. When the bid is added to the auction, the bidder's organization is added to the list of organizations that need to endorse any updates to the auction.
-2. The auction is **closed** to prevent additional bids from being added to the auction. After the auction is closed, bidders that submitted bids to the auction can reveal their full bid. Only revealed bids can win the auction.
-3. The auction is **ended** to calculate the winner from the set of revealed bids. All organizations participating in the auction calculate the price that clears the auction and the winning bid. The seller can end the auction only if all bidding organizations endorse the same winner and price.
+---
+Chainsaw provides a powerful ‘first-response’ capability to quickly identify threats within Windows forensic artefacts such as Event Logs and the MFT file. Chainsaw offers a generic and fast method of searching through event logs for keywords, and by identifying threats using built-in support for Sigma detection rules, and via custom Chainsaw detection rules.
 
-Before endorsing the transaction that ends the auction, each organization queries the implicit private data collection on their peers to check if any organization member has a winning bid that has not yet been revealed. If a winning bid is found, the organization will withhold their endorsement and prevent the auction from being closed. This prevents the seller from ending the auction prematurely, or colluding with buyers to end the auction at an artificially low price.
+## Features
 
-The sample uses several Fabric features to make the auction private and secure. Bids are stored in private data collections to prevent bids from being distributed to other peers in the channel. When bidding is closed, the auction smart contract uses the `GetPrivateDataHash()` API to verify that the bid stored in private data is the same bid that is being revealed. State based endorsement is used to add the organization of each bidder to the auction endorsement policy. The smart contract uses the `GetClientIdentity.GetID()` API to ensure that only the potential buyer can read their bid from private state and only the seller can close or end the auction.
+ - :dart: Hunt for threats using [Sigma](https://github.com/SigmaHQ/sigma) detection rules and custom Chainsaw detection rules
+ - :mag: Search and extract forensic artefacts by string matching, and regex patterns
+ - :date: Create execution timelines by analysing Shimcache artefacts and enriching them with Amcache data
+ - :bulb: Analyse the SRUM database and provide insights about it
+ - :arrow_down: Dump the raw content of forensic artefacts (MFT, registry hives, ESE databases)
+ - :zap: Lightning fast, written in rust, wrapping the [EVTX parser](https://github.com/omerbenamram/evtx) library by [@OBenamram](https://twitter.com/obenamram?lang=en)
+ - :feather: Clean and lightweight execution and output formats without unnecessary bloat
+ - :fire: Document tagging (detection logic matching) provided by the [TAU Engine](https://github.com/countercept/tau-engine) Library
+ - :bookmark_tabs: Output results in a variety of formats, such as ASCII table format, CSV format, and JSON format
+ - :computer: Can be run on MacOS, Linux and Windows
+---
 
-This tutorial uses the auction smart contract in a scenario where one seller wants to auction a painting. Four potential buyers from two different organizations will submit bids to the auction and try to win the auction.
+## Table Of Contents
 
-## Deploy the chaincode
+- [Features](#features)
+- [Why Chainsaw?](#why-chainsaw)
+- [Hunting Logic for Windows Event Logs](#hunting-logic-for-windows-event-logs)
+- [Quick Start Guide](#quick-start-guide)
+  - [Downloading and Running](#downloading-and-running)
+  - [EDR and AV Warnings](#edr-and-av-warnings)
+  - [What changed in Chainsaw v2](#what-changed-in-chainsaw-v2)
+- [Examples](#examples)
+  - [Searching](#searching)
+  - [Hunting](#hunting)
+  - [Analysis](#analysis)
+    - [Shimcache](#shimcache)
+    - [SRUM (System Resource Usage Monitor)](#srum-system-resource-usage-monitor)
+  - [Dumping](#srum)
+- [Acknowledgements](#acknowledgements)
 
-We will run the auction smart contract using the Fabric test network. Open a command terminal and navigate to the test network directory:
-```
-cd fabric-samples/test-network
-```
-
-You can then run the following command to deploy the test network.
-```
-./network.sh up createChannel -ca
-```
-
-Note that we use the `-ca` flag to deploy the network using certificate authorities. We will use the CA to register and enroll our sellers and buyers.
-
-Run the following command to deploy the auction smart contract. We will override the default endorsement policy to allow any channel member to create an auction without requiring an endorsement from another organization.
-```
-./network.sh deployCC -ccn auction -ccp ../auction-simple/chaincode-go/ -ccl go -ccep "OR('Org1MSP.peer','Org2MSP.peer')"
-```
-
-## Install the application dependencies
-
-We will interact with the auction smart contract through a set of Node.js applications. Change into the `application-javascript` directory:
-```
-cd fabric-samples/auction-simple/application-javascript
-```
-
-From this directory, run the following command to download the application dependencies:
-```
-npm install
-```
-
-## Register and enroll the application identities
-
-To interact with the network, you will need to enroll the Certificate Authority administrators of Org1 and Org2. You can use the `enrollAdmin.js` program for this task. Run the following command to enroll the Org1 admin:
-```
-node enrollAdmin.js org1
-```
-You should see the logs of the admin wallet being created on your local file system. Now run the command to enroll the CA admin of Org2:
-```
-node enrollAdmin.js org2
-```
-
-We can use the CA admins of both organizations to register and enroll the identities of the seller that will create the auction and the bidders who will try to purchase the painting.
-
-Run the following command to register and enroll the seller identity that will create the auction. The seller will belong to Org1.
-```
-node registerEnrollUser.js org1 seller
-```
-
-You should see the logs of the seller wallet being created as well. Run the following commands to register and enroll 2 bidders from Org1 and another 2 bidders from Org2:
-```
-node registerEnrollUser.js org1 bidder1
-node registerEnrollUser.js org1 bidder2
-node registerEnrollUser.js org2 bidder3
-node registerEnrollUser.js org2 bidder4
-```
-
-## Create the auction
-
-The seller from Org1 would like to create an auction to sell a vintage Matchbox painting. Run the following command to use the seller wallet to run the `createAuction.js` application. The program will submit a transaction to the network that creates the auction on the channel ledger. The organization and identity name are passed to the application to use the wallet that was created by the `registerEnrollUser.js` application. The seller needs to provide an ID for the auction and the item to be sold to create the auction:
-```
-node createAuction.js org1 seller PaintingAuction painting
-```
-
-After the transaction is complete, the `createAuction.js` application will query the auction stored in the public channel ledger:
-```
-*** Result: Auction: {
-  "objectType": "auction",
-  "item": "painting",
-  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
-  "organizations": [
-    "Org1MSP"
-  ],
-  "privateBids": {},
-  "revealedBids": {},
-  "winner": "",
-  "price": 0,
-  "status": "open"
-}
-```
-The smart contract uses the `GetClientIdentity().GetID()` API to read the identity that creates the auction and defines that identity as the auction `"seller"`. The seller is identified by the name and issuer of the seller's certificate.
-
-## Bid on the auction
+Extended information can be found in the Wiki for this tool: https://github.com/WithSecureLabs/chainsaw/wiki
 
-We can now use the bidder wallets to submit bids to the auction:
+## Why Chainsaw?
 
-### Bid as bidder1
+At WithSecure Countercept, we ingest a wide range of telemetry sources from endpoints via our EDR agent to provide our managed detection and response service. However, there are circumstances where we need to quickly analyse forensic artefacts that hasn’t been captured by our EDR, a common example being incident response investigations on an estate where our EDR wasn’t installed at the time of the compromise. Chainsaw was created to provide our threat hunters and incident response consultants with a tool to perform rapid triage of forensic artefacts in these circumstances.
 
-Bidder1 will create a bid to purchase the painting for 800 dollars.
-```
-node bid.js org1 bidder1 PaintingAuction 800
-```
+### Windows Event Logs
 
-The application will query the bid after it is created:
-```
-*** Result:  Bid: {
-  "objectType": "bid",
-  "price": 800,
-  "org": "Org1MSP",
-  "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
-}
-```
+Windows event logs provide a rich source of forensic information for threat hunting and incident response investigations. Unfortunately, processing and searching through event logs can be a slow and time-consuming process, and in most cases requires the overhead of surrounding infrastructure – such as an ELK stack or Splunk instance – to hunt efficiently through the log data and apply detection logic. This overhead often means that blue teams are unable to quickly triage Windows event logs to provide the direction and conclusions required to progress their investigations. Chainsaw solves the issue since it allows the rapid search and hunt through Windows event logs.
 
-The bid is stored in the Org1 implicit data collection. The `"bidder"` parameter is the information from the certificate of the user that created the bid. Only this identity will be able can query the bid from private state or reveal the bid during the auction.
+At the time of writing, there are very few open-source, standalone tools that provide a simple and fast method of triaging Windows event logs, identifying interesting elements within the logs and applying a detection logic rule format (such as Sigma) to detect signs of malicious activity. In our testing, the tools that did exist struggled to efficiently apply detection logic to large volumes of event logs making them unsuitable for scenarios where quick triage is required.
 
-The `bid.js` application also prints the bidID:
-```
-*** Result ***SAVE THIS VALUE*** BidID: 67d85ef08e32de20994c816362d0952fe5c2ae3f2d1083600c3ac61f65a89f60
-```
+## Hunting Logic for Windows Event Logs
 
-The BidID acts as the unique identifier for the bid. This ID allows you to query the bid using the `queryBid.js` program and add the bid to the auction. Save the bidID returned by the application as an environment variable in your terminal:
-```
-export BIDDER1_BID_ID=67d85ef08e32de20994c816362d0952fe5c2ae3f2d1083600c3ac61f65a89f60
-```
-This value will be different for each transaction, so you will need to use the value returned in your terminal.
+### Sigma Rule Matching
+Using the `--sigma` and `--mapping` parameters you can specify a directory containing a subset of SIGMA detection rules (or just the entire SIGMA git repo) and chainsaw will automatically load, convert and run these rules against the provided event logs. The mapping file tells chainsaw which fields in the event logs to use for rule matching. By default, Chainsaw supports a wide range of Event Log types, including but not limited to:
 
-Now that the bid has been created, you can submit the bid to the auction. Run the following command to submit the bid that was just created:
-```
-node submitBid.js org1 bidder1 PaintingAuction $BIDDER1_BID_ID
-```
+|Event Type|Event ID  |
+|--|--|
+|Process Creation (Sysmon)| 1 |
+|Network Connections (Sysmon)|3|
+|Image Loads (Sysmon)|7|
+|File Creation (Sysmon)|11|
+|Registry Events (Sysmon)|13|
+|Powershell Script Blocks|4104|
+|Process Creation|4688|
+|Scheduled Task Creation|4698|
+|Service Creation|7045|
 
-The hash of bid will be added to the list private bids in that have been submitted to `PaintingAuction`. Storing the hash in the public auction allows users to accurately reveal the bid after bidding is closed. The application will query the auction to verify that the bid was added:
-```
-*** Result: Auction: {
-  "objectType": "auction",
-  "item": "painting",
-  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
-  "organizations": [
-    "Org1MSP"
-  ],
-  "privateBids": {
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "org": "Org1MSP",
-      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
-    }
-  },
-  "revealedBids": {},
-  "winner": "",
-  "price": 0,
-  "status": "open"
-}
-```
+See the mapping file for the full list of fields that are used for rule detection, and feel free to extend it to your needs.
 
-### Bid as bidder2
+### Chainsaw Detection Rules
+In addition to supporting sigma rules, Chainsaw also supports a custom rule format. In the repository you will find a `rules` directory that contains various Chainsaw rules that allows users to:
 
-Let's submit another bid. Bidder2 would like to purchase the painting for 500 dollars.
-```
-node bid.js org1 bidder2 PaintingAuction 500
-```
+ 1. Extract and parse Windows Defender, F-Secure, Sophos, and Kaspersky AV alerts
+ 2. Detect key event logs being cleared, or the event log service being stopped
+ 3. Users being created or added to sensitive user groups
+ 4. Remote Logins (Service, RDP, Network etc.) events. This helps hunters to identify sources of lateral movement
+ 5. Brute-force of local user accounts
 
-Save the Bid ID returned by the application:
-```
-export BIDDER2_BID_ID=0fa8b3b15923966f205a1f5ebd163d2707d069ffa055105114fc654d225f511d
-```
 
-Submit bidder2's bid to the auction:
-```
-node submitBid.js org1 bidder2 PaintingAuction $BIDDER2_BID_ID
-```
+## Quick Start Guide
+### Downloading and Running
 
-### Bid as bidder3 from Org2
+With the release of Chainsaw v2, we decided to no longer include the Sigma Rules and EVTX-Attack-Samples repositories as Chainsaw submodules. We recommend that you clone these repositories separately to ensure you have the latest versions.
 
-Bidder3 will bid 700 dollars for the painting:
-```
-node bid.js org2 bidder3 PaintingAuction 700
-```
+If you still need an all-in-one package containing the Chainsaw binary, Sigma rules and example Event logs, you can download it from the [releases section](https://github.com/WithSecureLabs/chainsaw/releases) of this GitHub repo. In this releases section you will also find pre-compiled binary-only versions of Chainsaw for various platforms and architectures.
 
-Save the Bid ID returned by the application:
-```
-export BIDDER3_BID_ID=cda8bb2849fc0553efb036c56ea86d82791a695b5641941dac797dc6e2d75768
-```
+If you want to compile Chainsaw yourself, you can clone the Chainsaw repo:
 
-Add bidder3's bid to the auction:
-```
-node submitBid.js org2 bidder3 PaintingAuction $BIDDER3_BID_ID
-```
+ `git clone https://github.com/WithSecureLabs/chainsaw.git`
 
-Because bidder3 belongs to Org2, submitting the bid will add Org2 to the list of participating organizations. You can see the Org2 MSP ID has been added to the list of `"organizations"` in the updated auction returned by the application:
-```
-*** Result: Auction: {
-  "objectType": "auction",
-  "item": "painting",
-  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
-  "organizations": [
-    "Org1MSP",
-    "Org2MSP"
-  ],
-  "privateBids": {
-    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
-      "org": "Org1MSP",
-      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "org": "Org1MSP",
-      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
-      "org": "Org2MSP",
-      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
-    }
-  },
-  "revealedBids": {},
-  "winner": "",
-  "price": 0,
-  "status": "open"
-}
-```
+and compile the code yourself by running:  `cargo build --release`. Once the build has finished, you will find a copy of the compiled binary in the target/release folder.
 
-Now that a bid from Org2 has been added to the auction, any updates to the auction need to be endorsed by the Org2 peer. The applications will use `"organizations"` field to specify which organizations need to endorse submitting a new bid, revealing a bid, or updating the auction status.
+**Make sure to build with the `--release` flag as this will ensure significantly faster execution time.**
 
-### Bid as bidder4
+If you want to quickly see what Chainsaw looks like when it runs, you can clone the [Sigma Rules](https://github.com/SigmaHQ/sigma) and [EVTX-Attack-Samples](https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES) repositories:
 
-Bidder4 from Org2 would like to purchase the painting for 900 dollars:
 ```
-node bid.js org2 bidder4 PaintingAuction 900
+git clone https://github.com/SigmaHQ/sigma
+git clone https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES.git
 ```
-
-Save the Bid ID returned by the application:
+and then run Chainsaw with the parameters below:
 ```
-export BIDDER4_BID_ID=83861eb17715ff537a1e73cd2d08509dc7199572806a5368706516759af1a257
+./chainsaw hunt EVTX-ATTACK-SAMPLES/ -s sigma/ --mapping mappings/sigma-event-logs-all.yml
 ```
+### EDR and AV Warnings
 
-Add bidder4's bid to the auction:
-```
-node submitBid.js org2 bidder4 PaintingAuction $BIDDER4_BID_ID
-```
+When downloading and running chainsaw you may find that your local EDR / AntiVirus engine detects Chainsaw as malicious. You can see examples of this in the following GitHub issues: [Example1](https://github.com/WithSecureLabs/chainsaw/issues/12), [Example2](https://github.com/WithSecureLabs/chainsaw/issues/47).
 
-## Close the auction
+These warnings are typically due to the example event logs and/or Sigma rules which contain references to malicious strings (e.g. "mimikatz"). We have also seen instances where the Chainsaw binary has been detected by a small subset of Anti-Virus engines likely due to some form of heuristics detection.
 
-Now that all four bidders have joined the auction, the seller would like to close the auction and allow buyers to reveal their bids. The seller identity that created the auction needs to submit the transaction:
-```
-node closeAuction.js org1 seller PaintingAuction
-```
+### What changed in Chainsaw v2?
 
-The application will query the auction to allow you to verify that the auction status has changed to closed. As a test, you can try to create and submit a new bid to verify that no new bids can be added to the auction.
+In July 2022 we released version 2 of Chainsaw which is a major overhaul of how Chainsaw operates. Chainsaw v2 contains several significant improvements, including the following list of highlights:
 
-## Reveal bids
+ - An improved approach to mapping Sigma rules which results in a significant increase in the number of supported Chainsaw rules, and Event Log event types.
+ - Improved CLI output which shows a snapshot of all Event Data for event logs containing detections.
+ - Support for loading and parsing Event Logs in both JSON and XML format.
+ - Cleaner and simpler command line arguments for the Hunt and Search features.
+ - Additional optional output information, such as Rule Author, Rule Status, Rule Level etc.
+ - The ability to filter loaded rules by status, kind, and severity level.
+ - Inbuilt Chainsaw Detection rules have been broken out into dedicated Chainsaw rule files
+ - A clean and rewrite of Chainsaw's code to improve readability and to reduce the overhead for community contributions.
 
-After the auction is closed, bidders can try to win the auction by revealing their bids. The transaction to reveal a bid needs to pass four checks:
-1. The auction is closed.
-2. The transaction was submitted by the identity that created the bid.
-3. The hash of the revealed bid matches the hash of the bid on the channel ledger. This confirms that the bid is the same as the bid that is stored in the private data collection.
-4. The hash of the revealed bid matches the hash that was submitted to the auction. This confirms that the bid was not altered after the auction was closed.
+If you still wish to use the version 1 of Chainsaw, you can find compiled binaries in the [releases section](https://github.com/WithSecureLabs/chainsaw/releases), or you can access the source code in the [v1.x.x branch](https://github.com/WithSecureLabs/chainsaw/tree/v1.x.x). Please note that Chainsaw v1 is no longer being maintained, and all users should look to move to Chainsaw v2.
 
-Use the `revealBid.js` application to reveal the bid of Bidder1:
-```
-node revealBid.js org1 bidder1 PaintingAuction $BIDDER1_BID_ID
-```
+A massive thank you to [@AlexKornitzer](https://twitter.com/AlexKornitzer?lang=en) who managed to convert Chainsaw v1's "Christmas Project" codebase into a polished product in v2.
 
-The full bid details, including the price, are now visible:
-```
-*** Result: Auction: {
-  "objectType": "auction",
-  "item": "painting",
-  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
-  "organizations": [
-    "Org1MSP",
-    "Org2MSP"
-  ],
-  "privateBids": {
-    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
-      "org": "Org2MSP",
-      "hash": "08db66c6cc226577a3153dadeb0b77d3834162fcf5f008b344058a1bc5c1b3a4"
-    },
-    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
-      "org": "Org1MSP",
-      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "org": "Org1MSP",
-      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
-      "org": "Org2MSP",
-      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
-    }
-  },
-  "revealedBids": {
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "objectType": "bid",
-      "price": 800,
-      "org": "Org1MSP",
-      "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
-    }
-  },
-  "winner": "",
-  "price": 0,
-  "status": "closed"
-}
-```
+## Examples
+### Searching
 
-Bidder3 from Org2 will also reveal their bid:
-```
-node revealBid.js org2 bidder3 PaintingAuction $BIDDER3_BID_ID
-```
+      USAGE:
+          chainsaw search [FLAGS] [OPTIONS] <pattern> [--] [path]...
 
-If the auction ended now, Bidder1 would win. Let's try to end the auction using the seller identity and see what happens.
+      FLAGS:
+          -h, --help            Prints help information
+          -i, --ignore-case     Ignore the case when searching patterns
+              --json            Print the output in json format
+              --load-unknown    Allow chainsaw to try and load files it cannot identify
+              --local           Output the timestamp using the local machine's timestamp
+          -q                    Supress informational output
+              --skip-errors     Continue to search when an error is encountered
+          -V, --version         Prints version information
 
-```
-node endAuction.js org1 seller PaintingAuction
-```
+      OPTIONS:
+              --extension <extension>...    Only search through files with the provided extension
+              --from <from>                 The timestamp to search from. Drops any documents older than the value provided
+          -o, --output <output>             The path to output results to
+          -e, --regex <pattern>...          A string or regular expression pattern to search for
+          -t, --tau <tau>...                Tau expressions to search with. e.g. 'Event.System.EventID: =4104'
+              --timestamp <timestamp>       The field that contains the timestamp
+              --timezone <timezone>         Output the timestamp using the timezone provided
+              --to <to>                     The timestamp to search up to. Drops any documents newer than the value provided
 
-The output should look something like the following:
+      ARGS:
+          <pattern>    A string or regular expression pattern to search for. Not used when -e or -t is specified
+          <path>...    The paths containing event logs to load and hunt through
 
-```
---> Submit the transaction to end the auction
-2021-01-28T16:47:27.501Z - error: [DiscoveryHandler]: compareProposalResponseResults[undefined] - read/writes result sets do not match index=1
-2021-01-28T16:47:27.503Z - error: [Transaction]: Error: No valid responses from any peers. Errors:
-    peer=undefined, status=grpc, message=Peer endorsements do not match
-******** FAILED to submit bid: Error: No valid responses from any peers. Errors:
-    peer=undefined, status=grpc, message=Peer endorsements do not match
-```
+#### Command Examples
 
-Instead of ending the auction, the transaction results in an endorsement policy failure. The end of the auction needs to be endorsed by Org2. Before endorsing the transaction, the Org2 peer queries its private data collection for any winning bids that have not yet been revealed. Because Bidder4 created a bid that is above the winning price, the Org2 peer refuses to endorse the transaction that would end the auction.
+   *Search all .evtx files for the case-insensitive string "mimikatz"*
 
-Before we can end the auction, we need to reveal the bid from bidder4.
-```
-node revealBid.js org2 bidder4 PaintingAuction $BIDDER4_BID_ID
-```
+    ./chainsaw search mimikatz -i evtx_attack_samples/
 
-Bidder2 from Org1 would not win the auction in either case. As a result, Bidder2 decides not to reveal their bid.
+ *Search all .evtx files for powershell script block events (Event ID 4014)
 
-## End the auction
+    ./chainsaw search -t 'Event.System.EventID: =4104' evtx_attack_samples/
 
-Now that the winning bids have been revealed, we can end the auction:
-```
-node endAuction org1 seller PaintingAuction
-```
+   *Search a specific evtx log for logon events, with a matching regex pattern, output in JSON format*
 
-The transaction was successfully endorsed by both Org1 and Org2, who both calculated the same price and winner. The winning bidder is listed along with the price:
-```
-*** Result: Auction: {
-  "objectType": "auction",
-  "item": "painting",
-  "seller": "x509::CN=seller,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US",
-  "organizations": [
-    "Org1MSP",
-    "Org2MSP"
-  ],
-  "privateBids": {
-    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
-      "org": "Org2MSP",
-      "hash": "08db66c6cc226577a3153dadeb0b77d3834162fcf5f008b344058a1bc5c1b3a4"
-    },
-    "\u0000bid\u0000PaintingAuction\u00001b9dc0006fef10413df5cca927cabdf73ab854fe92b7a7b2eebfa00961fdac67\u0000": {
-      "org": "Org1MSP",
-      "hash": "15cd9a3e12825017f3e758499ac6138ebbe1adec4c49cc6ea6a0973fc6514666"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "org": "Org1MSP",
-      "hash": "0b8bbdb96b1d252e71ac1ed71df3580f7a0e31a743a4a09bbf5196dffef426b2"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
-      "org": "Org2MSP",
-      "hash": "14d47d17acceceb483e87c14a4349844874fce549d71c6a23457d953ed8ffbd3"
-    }
-  },
-  "revealedBids": {
-    "\u0000bid\u0000PaintingAuction\u000019a7a0dd2c5456a3f79c2f9ccb09dddd0f1c9ece514dfea7cbea06e7cbc79855\u0000": {
-      "objectType": "bid",
-      "price": 900,
-      "org": "Org2MSP",
-      "bidder": "x509::CN=bidder4,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005c049b0b4552d34c88e0f8fb5abca31fa04472b7e1336a16650ac8cfb0b16472\u0000": {
-      "objectType": "bid",
-      "price": 800,
-      "org": "Org1MSP",
-      "bidder": "x509::CN=bidder1,OU=client+OU=org1+OU=department1::CN=ca.org1.example.com,O=org1.example.com,L=Durham,ST=North Carolina,C=US"
-    },
-    "\u0000bid\u0000PaintingAuction\u00005ee4fa53b54ea0821e57a6884a1ada5eb04f136ee222e92d7399bcdf47556ea1\u0000": {
-      "objectType": "bid",
-      "price": 700,
-      "org": "Org2MSP",
-      "bidder": "x509::CN=bidder3,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK"
-    }
-  },
-  "winner": "x509::CN=bidder4,OU=client+OU=org2+OU=department1::CN=ca.org2.example.com,O=org2.example.com,L=Hursley,ST=Hampshire,C=UK",
-  "price": 900,
-  "status": "ended"
-}
-```
+    ./chainsaw search -e "DC[0-9].insecurebank.local" evtx_attack_samples --json
 
-## Clean up
 
-When your are done using the auction smart contract, you can bring down the network and clean up the environment. In the `auction-simple/application-javascript` directory, run the following command to remove the wallets used to run the applications:
-```
-rm -rf wallet
-```
+### Hunting
 
-You can then navigate to the test network directory and bring down the network:
-````
-cd ../../test-network/
-./network.sh down
-````
+      USAGE:
+          chainsaw hunt [FLAGS] [OPTIONS] [--] [path]...
+
+      FLAGS:
+              --csv             Print the output in csv format
+              --full            Print the full values for the tabular output
+          -h, --help            Prints help information
+              --json            Print the output in json format
+              --load-unknown    Allow chainsaw to try and load files it cannot identify
+              --local           Output the timestamp using the local machine's timestamp
+              --log             Print the output in log like format
+              --metadata        Display additional metadata in the tablar output
+          -q                    Supress informational output
+              --skip-errors     Continue to hunt when an error is encountered
+          -V, --version         Prints version information
+
+      OPTIONS:
+              --column-width <column-width>    Set the column width for the tabular output
+              --extension <extension>...       Only hunt through files with the provided extension
+              --from <from>                    The timestamp to hunt from. Drops any documents older than the value provided
+              --kind <kind>...                 Restrict loaded rules to specified kinds
+              --level <level>...               Restrict loaded rules to specified levels
+          -m, --mapping <mapping>...           A mapping file to tell Chainsaw how to use third-party rules
+          -o, --output <output>                A path to output results to
+          -r, --rule <rule>...                 A path containing additional rules to hunt with
+          -s, --sigma <sigma>...               A path containing Sigma rules to hunt with
+              --status <status>...             Restrict loaded rules to specified statuses
+              --timezone <timezone>            Output the timestamp using the timezone provided
+              --to <to>                        The timestamp to hunt up to. Drops any documents newer than the value provided
+
+      ARGS:
+          <rules>      The path to a collection of rules to use for hunting
+          <path>...    The paths containing event logs to load and hunt through
+
+#### Command Examples
+
+   *Hunt through all evtx files using Sigma rules for detection logic*
+
+    ./chainsaw hunt evtx_attack_samples/ -s sigma/ --mapping mappings/sigma-event-logs-all.yml
+
+   *Hunt through all evtx files using Sigma rules and Chainsaw rules for detection logic and output in CSV format to the results folder*
+
+    ./chainsaw hunt evtx_attack_samples/ -s sigma/ --mapping mappings/sigma-event-logs-all.yml -r rules/ --csv --output results
+
+   *Hunt through all evtx files using Sigma rules for detection logic, only search between specific timestamps, and output the results in JSON format*
+
+     ./chainsaw hunt evtx_attack_samples/ -s sigma/ --mapping mappings/sigma-event-logs-all.yml --from "2019-03-17T19:09:39" --to "2019-03-17T19:09:50" --json
+
+#### Output
+
+    $ ./chainsaw hunt -r rules/ evtx_attack_samples -s sigma/rules --mapping mappings/sigma-event-logs-all.yml --level critical
+
+         ██████╗██╗  ██╗ █████╗ ██╗███╗   ██╗███████╗ █████╗ ██╗    ██╗
+        ██╔════╝██║  ██║██╔══██╗██║████╗  ██║██╔════╝██╔══██╗██║    ██║
+        ██║     ███████║███████║██║██╔██╗ ██║███████╗███████║██║ █╗ ██║
+        ██║     ██╔══██║██╔══██║██║██║╚██╗██║╚════██║██╔══██║██║███╗██║
+        ╚██████╗██║  ██║██║  ██║██║██║ ╚████║███████║██║  ██║╚███╔███╔╝
+         ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
+            By WithSecure Countercept (@FranticTyping, @AlexKornitzer)
+
+        [+] Loading detection rules from: ../../rules/, /tmp/sigma/rules
+        [+] Loaded 129 detection rules (198 not loaded)
+        [+] Loading event logs from: ../../evtx_attack_samples (extensions: .evtx)
+        [+] Loaded 268 EVTX files (37.5 MB)
+        [+] Hunting: [========================================] 268/268
+
+        [+] Group: Antivirus
+        ┌─────────────────────┬────────────────────┬──────────┬───────────┬─────────────┬────────────────────────────────┬──────────────────────────────────┬────────────────────┐
+        │      timestamp      │     detections     │ Event ID │ Record ID │  Computer   │          Threat Name           │           Threat Path            │        User        │
+        ├─────────────────────┼────────────────────┼──────────┼───────────┼─────────────┼────────────────────────────────┼──────────────────────────────────┼────────────────────┤
+        │ 2019-07-18 20:40:00 │ ‣ Windows Defender │ 1116     │ 37        │ MSEDGEWIN10 │ Trojan:PowerShell/Powersploit. │ file:_C:\AtomicRedTeam\atomic-   │ MSEDGEWIN10\IEUser │
+        │                     │                    │          │           │             │ M                              │ red-team-master\atomics\T1056\   │                    │
+        │                     │                    │          │           │             │                                │ Get-Keystrokes.ps1               │                    │
+        ├─────────────────────┼────────────────────┼──────────┼───────────┼─────────────┼────────────────────────────────┼──────────────────────────────────┼────────────────────┤
+        │ 2019-07-18 20:53:31 │ ‣ Windows Defender │ 1117     │ 106       │ MSEDGEWIN10 │ Trojan:XML/Exeselrun.gen!A     │ file:_C:\AtomicRedTeam\atomic-   │ MSEDGEWIN10\IEUser │
+        │                     │                    │          │           │             │                                │ red-team-master\atomics\T1086\   │                    │
+        │                     │                    │          │           │             │                                │ payloads\test.xsl                │                    │
+        └─────────────────────┴────────────────────┴──────────┴───────────┴─────────────┴────────────────────────────────┴──────────────────────────────────┴────────────────────┘
+
+        [+] Group: Log Tampering
+        ┌─────────────────────┬───────────────────────────────┬──────────┬───────────┬────────────────────────────────┬───────────────┐
+        │      timestamp      │          detections           │ Event ID │ Record ID │            Computer            │     User      │
+        ├─────────────────────┼───────────────────────────────┼──────────┼───────────┼────────────────────────────────┼───────────────┤
+        │ 2019-01-20 07:00:50 │ ‣ Security Audit Logs Cleared │ 1102     │ 32853     │ WIN-77LTAPHIQ1R.example.corp   │ Administrator │
+        └─────────────────────┴───────────────────────────────┴──────────┴───────────┴────────────────────────────────┴───────────────┘
+
+        [+] Group: Sigma
+        ┌─────────────────────┬────────────────────────────────┬───────┬────────────────────────────────┬──────────┬───────────┬──────────────────────────┬──────────────────────────────────┐
+        │      timestamp      │           detections           │ count │     Event.System.Provider      │ Event ID │ Record ID │         Computer         │            Event Data            │
+        ├─────────────────────┼────────────────────────────────┼───────┼────────────────────────────────┼──────────┼───────────┼──────────────────────────┼──────────────────────────────────┤
+        │ 2019-04-29 20:59:14 │ ‣ Malicious Named Pipe         │ 1     │ Microsoft-Windows-Sysmon       │ 18       │ 8046      │ IEWIN7                   │ ---                              │
+        │                     │                                │       │                                │          │           │                          │ Image: System                    │
+        │                     │                                │       │                                │          │           │                          │ PipeName: "\\46a676ab7f179e511   │
+        │                     │                                │       │                                │          │           │                          │ e30dd2dc41bd388"                 │
+        │                     │                                │       │                                │          │           │                          │ ProcessGuid: 365ABB72-D9C4-5CC   │
+        │                     │                                │       │                                │          │           │                          │ 7-0000-0010EA030000              │
+        │                     │                                │       │                                │          │           │                          │ ProcessId: 4                     │
+        │                     │                                │       │                                │          │           │                          │ RuleName: ""                     │
+        │                     │                                │       │                                │          │           │                          │ UtcTime: "2019-04-29 20:59:14.   │
+        │                     │                                │       │                                │          │           │                          │ 430"                             │
+        ├─────────────────────┼────────────────────────────────┼───────┼────────────────────────────────┼──────────┼───────────┼──────────────────────────┼──────────────────────────────────┤
+        │ 2019-04-30 20:26:51 │ ‣ CobaltStrike Service         │ 1     │ Microsoft-Windows-Sysmon       │ 13       │ 9806      │ IEWIN7                   │ ---                              │
+        │                     │ Installations in Registry      │       │                                │          │           │                          │ Details: "%%COMSPEC%% /b /c st   │
+        │                     │                                │       │                                │          │           │                          │ art /b /min powershell.exe -no   │
+        │                     │                                │       │                                │          │           │                          │ p -w hidden -noni -c \"if([Int   │
+        │                     │                                │       │                                │          │           │                          │ Ptr]::Size -eq 4){$b='powershe   │
+        │                     │                                │       │                                │          │           │                          │ ll.exe'}else{$b=$env:windir+'\   │
+        │                     │                                │       │                                │          │           │                          │ \syswow64\\WindowsPowerShell\\   │
+        │                     │                                │       │                                │          │           │                          │ v1.0\\powershell.exe'};$s=New-   │
+        │                     │                                │       │                                │          │           │                          │ Object System.Diagnostics.Proc   │
+        │                     │                                │       │                                │          │           │                          │ essStartInfo;$s.FileName=$b;$s   │
+        │                     │                                │       │                                │          │           │                          │ .Arguments='-noni -nop -w hidd   │
+        │                     │                                │       │                                │          │           │                          │ en -c &([scriptblock]::create(   │
+        │                     │                                │       │                                │          │           │                          │ (New-Object IO.StreamReader(Ne   │
+        │                     │                                │       │                                │          │           │                          │ w-Object IO.Compression.GzipSt   │
+        │                     │                                │       │                                │          │           │                          │ ream((New-Object IO.MemoryStre   │
+        │                     │                                │       │                                │          │           │                          │ am(,[Convert]::FromBase64Strin   │
+        │                     │                                │       │                                │          │           │                          │ g(''H4sIAIuvyFwCA7VW+2/aSBD+OZ   │
+        │                     │                                │       │                                │          │           │                          │ H6P1...                          │
+        │                     │                                │       │                                │          │           │                          │ (use --full to show all content) │
+        │                     │                                │       │                                │          │           │                          │ EventType: SetValue              │
+        │                     │                                │       │                                │          │           │                          │ Image: "C:\\Windows\\system32\   │
+        │                     │                                │       │                                │          │           │                          │ \services.exe"                   │
+        │                     │                                │       │                                │          │           │                          │ ProcessGuid: 365ABB72-2586-5CC   │
+        │                     │                                │       │                                │          │           │                          │ 9-0000-0010DC530000              │
+        │                     │                                │       │                                │          │           │                          │ ProcessId: 460                   │
+        │                     │                                │       │                                │          │           │                          │ RuleName: ""                     │
+        │                     │                                │       │                                │          │           │                          │ TargetObject: "HKLM\\System\\C   │
+        │                     │                                │       │                                │          │           │                          │ urrentControlSet\\services\\he   │
+        │                     │                                │       │                                │          │           │                          │ llo\\ImagePath"                  │
+        │                     │                                │       │                                │          │           │                          │ UtcTime: "2019-04-30 20:26:51.   │
+        │                     │                                │       │                                │          │           │                          │ 934"                             │
+        ├─────────────────────┼────────────────────────────────┼───────┼────────────────────────────────┼──────────┼───────────┼──────────────────────────┼──────────────────────────────────┤
+        │ 2019-05-12 12:52:43 │ ‣ Meterpreter or Cobalt        │ 1     │ Service Control Manager        │ 7045     │ 10446     │ IEWIN7                   │ ---                              │
+        │                     │ Strike Getsystem Service       │       │                                │          │           │                          │ AccountName: LocalSystem         │
+        │                     │ Installation                   │       │                                │          │           │                          │ ImagePath: "%COMSPEC% /c ping    │
+        │                     │                                │       │                                │          │           │                          │ -n 1 127.0.0.1 >nul && echo 'W   │
+        │                     │                                │       │                                │          │           │                          │ inPwnage' > \\\\.\\pipe\\WinPw   │
+        │                     │                                │       │                                │          │           │                          │ nagePipe"                        │
+        │                     │                                │       │                                │          │           │                          │ ServiceName: WinPwnage           │
+        │                     │                                │       │                                │          │           │                          │ ServiceType: user mode service   │
+        │                     │                                │       │                                │          │           │                          │ StartType: demand start          │
+        ├─────────────────────┼────────────────────────────────┼───────┼────────────────────────────────┼──────────┼───────────┼──────────────────────────┼──────────────────────────────────┤
+        │ 2019-06-21 07:35:37 │ ‣ Dumpert Process Dumper       │ 1     │ Microsoft-Windows-Sysmon       │ 11       │ 238375    │ alice.insecurebank.local │ ---                              │
+        │                     │                                │       │                                │          │           │                          │ CreationUtcTime: "2019-06-21 0   │
+        │                     │                                │       │                                │          │           │                          │ 6:53:03.227"                     │
+        │                     │                                │       │                                │          │           │                          │ Image: "C:\\Users\\administrat   │
+        │                     │                                │       │                                │          │           │                          │ or\\Desktop\\x64\\Outflank-Dum   │
+        │                     │                                │       │                                │          │           │                          │ pert.exe"                        │
+        │                     │                                │       │                                │          │           │                          │ ProcessGuid: ECAD0485-88C9-5D0   │
+        │                     │                                │       │                                │          │           │                          │ C-0000-0010348C1D00              │
+        │                     │                                │       │                                │          │           │                          │ ProcessId: 3572                  │
+        │                     │                                │       │                                │          │           │                          │ RuleName: ""                     │
+        │                     │                                │       │                                │          │           │                          │ TargetFilename: "C:\\Windows\\   │
+        │                     │                                │       │                                │          │           │                          │ Temp\\dumpert.dmp"               │
+        │                     │                                │       │                                │          │           │                          │ UtcTime: "2019-06-21 07:35:37.   │
+        │                     │                                │       │                                │          │           │                          │ 324"                             │
+        └─────────────────────┴────────────────────────────────┴───────┴────────────────────────────────┴──────────┴───────────┴──────────────────────────┴──────────────────────────────────┘
+
+### Analysing
+#### Shimcache
+    COMMAND:
+        analyse shimcache                 Create an execution timeline from the shimcache with optional amcache enrichments
+
+    USAGE:
+        chainsaw analyse shimcache [OPTIONS] <SHIMCACHE>
+
+    ARGUMENTS:
+        <SHIMCACHE>                       The path to the shimcache artefact (SYSTEM registry file)
+
+    OPTIONS:
+        -e, --regex <pattern>             A string or regular expression for detecting shimcache entries whose timestamp matches their insertion time
+        -r, --regexfile <REGEX_FILE>      The path to a newline delimited file containing regex patterns for detecting shimcache entries whose timestamp matches their insertion time
+        -o, --output <OUTPUT>             The path to output the result csv file
+        -a, --amcache <AMCACHE>           The path to the amcache artefact (Amcache.hve) for timeline enrichment
+        -p, --tspair                      Enable near timestamp pair detection between shimcache and amcache for finding additional insertion timestamps for shimcache entries
+        -h, --help                        Print help
+
+- Example pattern file for the  `--regexfile` parameter is included in [analysis/shimcache_patterns.txt](analysis/shimcache_patterns.txt).
+- Regex patterns are matched on paths in shimcache entries **converted to lowercase**.
+
+##### Command Examples
+   *Analyse a shimcache artefact with the provided regex patterns, and use amcache enrichment with timestamp near pair detection enabled. Output to a csv file.*
+
+    ./chainsaw analyse shimcache ./SYSTEM --regexfile ./analysis/shimcache_patterns.txt --amcache ./Amcache.hve --tspair --output ./output.csv
+
+
+   *Analyse a shimcache artefact with the provided regex patterns (without amcache enrichment). Output to the terminal.*
+
+    ./chainsaw analyse shimcache ./SYSTEM --regexfile ./analysis/shimcache_patterns.txt
+
+#### SRUM (System Resource Usage Monitor)
+The SRUM parser implemented in Chainsaw differs from other parsers because it does not rely on hardcoded values about the tables. The information is extracted directly from the SOFTWARE hive, which is mandatory. The goal is to avoid errors related to unknown tables.
+
+    COMMAND:
+        analyse srum                             Analyse the SRUM database
+
+    USAGE:
+        chainsaw analyse srum [OPTIONS] --software <SOFTWARE_HIVE_PATH> <SRUM_PATH>
+
+    ARGUMENTS:
+        <SRUM_PATH>                              The path to the SRUM database
+
+    OPTIONS:
+        -s, --software <SOFTWARE_HIVE_PATH>      The path to the SOFTWARE hive
+        -o, --output <OUTPUT>                    Save the output to a json file
+        -h, --help                               Print help
+
+##### Command Example
+
+   *Analyse the SRUM database (the SOFTWARE hive is mandatory)*
+
+    ./chainsaw analyse srum --software ./SOFTWARE ./SRUDB.dat --output ./output.json
+
+##### Output
+
+    $ ./chainsaw analyse srum --software ./SOFTWARE ./SRUDB.dat -o ./output.json
+
+         ██████╗██╗  ██╗ █████╗ ██╗███╗   ██╗███████╗ █████╗ ██╗    ██╗
+        ██╔════╝██║  ██║██╔══██╗██║████╗  ██║██╔════╝██╔══██╗██║    ██║
+        ██║     ███████║███████║██║██╔██╗ ██║███████╗███████║██║ █╗ ██║
+        ██║     ██╔══██║██╔══██║██║██║╚██╗██║╚════██║██╔══██║██║███╗██║
+        ╚██████╗██║  ██║██║  ██║██║██║ ╚████║███████║██║  ██║╚███╔███╔╝
+         ╚═════╝╚═╝  ╚═╝╚═╝  ╚═╝╚═╝╚═╝  ╚═══╝╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝
+            By WithSecure Countercept (@FranticTyping, @AlexKornitzer)
+
+        [+] ESE database file loaded from "/home/user/Documents/SRUDB.dat"
+        [+] Parsing the ESE database...
+        [+] SOFTWARE hive loaded from "/home/user/Documents/SOFTWARE"
+        [+] Parsing the SOFTWARE registry hive...
+        [+] Analysing the SRUM database...
+        [+] Details about the tables related to the SRUM extensions:
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | Table GUID                               | Table Name                                 | DLL Path                             | Timeframe of the data   | Expected Retention Time |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {5C8CF1C7-7257-4F13-B223-970EF5939312}   | App Timeline Provider                      | %SystemRoot%\System32\eeprov.dll     | 2022-03-10 16:34:59 UTC | 7 days                  |
+        |                                          |                                            |                                      | 2022-03-10 21:10:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {B6D82AF1-F780-4E17-8077-6CB9AD8A6FC4}   | Tagged Energy Provider                     | %SystemRoot%\System32\eeprov.dll     | No records              | 3 days                  |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {D10CA2FE-6FCF-4F6D-848E-B2E99266FA86}   | WPN SRUM Provider                          | %SystemRoot%\System32\wpnsruprov.dll | 2022-03-10 20:09:00 UTC | 60 days                 |
+        |                                          |                                            |                                      | 2022-03-10 21:09:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {D10CA2FE-6FCF-4F6D-848E-B2E99266FA89}   | Application Resource Usage Provider        | %SystemRoot%\System32\appsruprov.dll | 2022-03-10 16:34:59 UTC | 60 days                 |
+        |                                          |                                            |                                      | 2022-03-10 21:10:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {FEE4E14F-02A9-4550-B5CE-5FA2DA202E37}   | Energy Usage Provider                      | %SystemRoot%\System32\energyprov.dll | No records              | 60 days                 |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {FEE4E14F-02A9-4550-B5CE-5FA2DA202E37}LT | Energy Usage Provider (Long Term)          | %SystemRoot%\System32\energyprov.dll | No records              | 1820 days               |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {973F5D5C-1D90-4944-BE8E-24B94231A174}   | Windows Network Data Usage Monitor         | %SystemRoot%\System32\nduprov.dll    | 2022-03-10 16:34:59 UTC | 60 days                 |
+        |                                          |                                            |                                      | 2022-03-10 21:10:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {7ACBBAA3-D029-4BE4-9A7A-0885927F1D8F}   | vfuprov                                    | %SystemRoot%\System32\vfuprov.dll    | 2022-03-10 20:09:00 UTC | 60 days                 |
+        |                                          |                                            |                                      | 2022-03-10 21:10:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {DA73FB89-2BEA-4DDC-86B8-6E048C6DA477}   | Energy Estimation Provider                 | %SystemRoot%\System32\eeprov.dll     | No records              | 7 days                  |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        | {DD6636C4-8929-4683-974E-22C046A43763}   | Windows Network Connectivity Usage Monitor | %SystemRoot%\System32\ncuprov.dll    | 2022-03-10 16:34:59 UTC | 60 days                 |
+        |                                          |                                            |                                      | 2022-03-10 21:10:00 UTC |                         |
+        +------------------------------------------+--------------------------------------------+--------------------------------------+-------------------------+-------------------------+
+        [+] SRUM database parsed successfully
+        [+] Saving output to "/home/user/Documents/output.json"
+        [+] Saved output to "/home/user/Documents/output.json"
+
+##### Insights
+The information listed below is the result of a research project about the inner workings of SRUM, presented at the SANS DFIR Summit Europe 2023 on October 1, 2023. A [WithSecure Labs](https://labs.withsecure.com/publications) article will soon be published containing more information about it. The research was conducted by members of the incident response team at WithSecure: [Catarina de Faria Cristas](https://twitter.com/c_defaria), Lucas Echard and [Diego Fuschini](https://twitter.com/FuschiniDiego).
+
+In recent versions of Windows, SRUM no longer uses the registry to store temporarily database records. Nowadays, SRUM relies on 2 types of storage:
+- A **Tier1 store**, which is in memory and is updated every **Tier1Period (60 seconds by default)** with the data from the SRUM extensions.
+- A **Tier2 store**, which is the SRUM database on disk and is updated every **Tier2Period (1 hour by default)** with the content of the Tier1 store.
+
+The **retention period** in the SRUM database is **60 days by default**. It becomes **5 years** for **long term tables**, i.e., tables ending with **"\}LT"**. 
+
+The SRUM parser will output to stderr a [table](#output-1) containing details about the database, including the DLL associated with each SRUM extension. 
+
+Forensic insights about the DLLs investigated during the research can be found below:
+ - **nduprov.dll: Network Data Usage Provider DLL**
+    - Populates the Network Data Usage Provider table in the SRUM database. As a forensic artefact, the information in that table can be used to prove **data exfiltration**.
+    - There is **continuous monitoring** of the network traffic because of the **Ndu.sys driver**, which relies on the **Windows Filtering Platform (WFP)**. No exceptions were found so if network traffic was generated on a host, it will appear in the Network Data Usage Provider table.
+    - The **bytes in/out** available in the table include the **size of the frames** (from the layer 2 of the OSI model).
+    - If the network traffic goes through a **VPN**, then all the **bytes in/out** will be **associated with the VPN process/service**.
+- **eeprov.dll: Energy Estimator Provider DLL**
+    - Populates the tables Tagged Energy Provider, Energy Estimation Provider and App Timeline Provider.
+    - **App Timeline Provider**
+        - As a forensic artefact, the information in the App Timeline Provider table can be used to prove **execution**.
+        - The data in the table is the result of a query to the **Windows energy tracker**, using the syscall **NtPowerInformation(EnergyTrackerQuery, ...)**, every Tier1Period.
+        - A process appears in the table if it is **running** when the **Tier1 store** is updated.
+        - The retention period in the SRUM database for that provider is usually **7 days**.
+
+
+### Dumping
+
+    USAGE:
+        chainsaw dump [OPTIONS] <PATH>
+
+    ARGUMENTS:
+        <PATH>                  The path to an artefact to dump
+
+    OPTIONS:
+        -j, --json              Dump in json format
+            --jsonl             Print the output in jsonl format
+            --load-unknown      Allow chainsaw to try and load files it cannot identify
+        -o, --output <OUTPUT>   A path to output results to
+        -q                      Supress informational output
+            --skip-errors       Continue to hunt when an error is encountered
+        -h, --help              Print help
+
+#### Command Example
+
+   *Dump the SOFTWARE hive*
+
+    ./chainsaw dump ./SOFTWARE.hve --json --output ./output.json
+
+
+## Acknowledgements
+ - [EVTX-ATTACK-SAMPLES](https://github.com/sbousseaden/EVTX-ATTACK-SAMPLES) by [@SBousseaden](https://twitter.com/SBousseaden)
+ - [Sigma](https://github.com/SigmaHQ/sigma) detection rules
+ - [EVTX parser](https://github.com/omerbenamram/evtx) library by [@OBenamram](https://twitter.com/obenamram?lang=en)
+ - [TAU Engine](https://github.com/WithSecureLabs/tau-engine) Library by [@AlexKornitzer](https://twitter.com/AlexKornitzer?lang=en)
+ - Shimcache analysis feature developed as a part of [CC-Driver](https://www.ccdriver-h2020.com/) project, funded by the European Union’s Horizon 2020 Research and Innovation Programme under Grant Agreement No. 883543
